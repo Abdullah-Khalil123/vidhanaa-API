@@ -5,14 +5,24 @@ import userRoutes from "./routes/users";
 import userAuthRoutes from "./routes/userAuth";
 import { authMiddleware } from "./middleware/authMiddleware";
 
+// const corsOptions = {
+//   origin: process.env.FRONTEND_URL || "http://localhost:3000",
+//   credentials: true,
+// };
+
 const corsOptions = {
-  origin: process.env.FRONTEND_URL || "http://localhost:3000",
+  origin: [process.env.FRONTEND_URL || "http://localhost:3000"],
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   credentials: true,
+  allowedHeaders: ["Content-Type", "Authorization"],
 };
 
 const app = express();
-app.use(cors(corsOptions));
+
 app.use(express.json());
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 
 const port = process.env.PORT || 3001;
 
