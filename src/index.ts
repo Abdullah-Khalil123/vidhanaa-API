@@ -5,11 +5,16 @@ import userRoutes from "./routes/users";
 import userAuthRoutes from "./routes/userAuth";
 import { authMiddleware } from "./middleware/authMiddleware";
 
+const corsOptions = {
+  origin: process.env.FRONTEND_URL || "http://localhost:3000",
+  credentials: true,
+};
+
 const app = express();
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(express.json());
 
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 3001;
 
 app.use("/api/auth", userAuthRoutes);
 app.use("/api/user", authMiddleware, userRoutes);

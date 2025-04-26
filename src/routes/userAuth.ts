@@ -1,10 +1,14 @@
-import express from "express";
 import bcrypt from "bcrypt";
-import jwt, { SignOptions } from "jsonwebtoken";
-import prisma from "../lib/prisma";
+import express, { NextFunction, Request, Response } from "express";
 import { body, validationResult } from "express-validator"; // Input validation
-import { Request, Response, NextFunction } from "express"; // TypeScript types for better typing
+import jwt from "jsonwebtoken";
+import nodemailer from "nodemailer";
+import prisma from "../lib/prisma";
 
+const otpMap = new Map<
+  string,
+  { otp: string; expires: number; password?: string; name?: string }
+>();
 const router = express.Router();
 const secretKey = process.env.JWT_SECRET_KEY || "your_secret";
 
@@ -54,19 +58,27 @@ router.post("/login", async (req, res) => {
       return;
     }
 
-    // Define JWT options
-    const options: SignOptions = {
-      expiresIn: 60 * 60, // Token expiration time in seconds (24 hours)
-    };
+    // Generate and store OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    otpMap.set(email, { otp, expires: Date.now() + 5 * 60 * 1000 }); // 5 min expiry
 
-    // Generate JWT token
-    const token = jwt.sign(
-      { id: user.id, email: user.email },
-      secretKey,
-      options
-    );
+    // Send OTP (email here)
+    const transporter = nodemailer.createTransport({
+      service: "Gmail",
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+    });
 
-    res.json({ token });
+    await transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: "Your Login OTP",
+      text: `Your OTP is: ${otp}`,
+    });
+
+    res.json({ message: "OTP sent", step: "verify_otp" });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to log in" });
@@ -98,20 +110,144 @@ router.post("/signup", validateInput, async (req: Request, res: Response) => {
     // Hash the password
     const hashedPassword = await bcrypt.hash(password, saltRounds);
 
-    // Create the user in the database
-    const newUser = await prisma.user.create({
-      data: {
-        email,
-        password: hashedPassword,
-        name,
+    otpMap.set(email, {
+      otp: Math.floor(100000 + Math.random() * 900000).toString(),
+      expires: Date.now() + 5 * 60 * 1000,
+      password: hashedPassword,
+      name,
+    });
+
+    const transporter = nodemailer.createTransport({
+      service: "Gmail",
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
       },
     });
 
-    res.status(201).json({ message: "User created successfully" });
+    await transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: "Verify your account",
+      text: `Your signup OTP is: ${otpMap.get(email)?.otp}`,
+    });
+
+    res.status(200).json({ message: "OTP sent", step: "verify_otp" });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Failed to sign up" });
+    res.status(500).json({ error: "Failed to initiate signup" });
     return;
+  }
+});
+
+router.post(
+  "/social-login",
+  validateInput,
+  async (req: Request, res: Response) => {
+    const { email, name } = req.body;
+
+    try {
+      let user = await prisma.user.findUnique({
+        where: { email },
+      });
+
+      if (!user) {
+        user = await prisma.user.create({
+          data: {
+            email,
+            name,
+            password: "",
+          },
+        });
+      }
+
+      const token = jwt.sign({ id: user.id, email: user.email }, secretKey, {
+        expiresIn: 60 * 60,
+      });
+
+      res.json({ token, name: user.name, email: user.email });
+    } catch (error) {
+      console.error("Social login error:", error);
+      res.status(500).json({ error: "Failed to process social login" });
+    }
+  }
+);
+
+router.post("/verify-otp", async (req: Request, res: Response) => {
+  const { email, otp } = req.body;
+
+  try {
+    const record = otpMap.get(email);
+
+    if (!record || record.otp !== otp || Date.now() > record.expires) {
+      res.status(400).json({ error: "Invalid or expired OTP" });
+    }
+    otpMap.delete(email);
+
+    let user = await prisma.user.findUnique({ where: { email } });
+
+    if (record !== undefined && !user) {
+      // This means it's a signup flow
+      try {
+        user = await prisma.user.create({
+          data: {
+            email,
+            password: record.password as string,
+            name: record.name as string,
+          },
+        });
+      } catch (error) {
+        console.error("User creation error after OTP:", error);
+        res.status(500).json({ error: "Failed to create user" });
+      }
+    }
+
+    const token = jwt.sign({ id: user?.id, email: user?.email }, secretKey, {
+      expiresIn: 60 * 60,
+    });
+    res.json({ token, name: user?.name, email: user?.email });
+  } catch (error) {
+    console.error("OTP verification error:", error);
+    res.status(500).json({ error: "Failed to verify OTP" });
+  }
+});
+
+router.post("/resend-otp", async (req: Request, res: Response) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      res.status(400).json({ error: "Email is required" });
+    }
+
+    const user = await prisma.user.findUnique({ where: { email } });
+
+    if (!user) {
+      res.status(404).json({ error: "User not found" });
+    }
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    otpMap.set(email, { otp, expires: Date.now() + 5 * 60 * 1000 }); // reset OTP
+
+    const transporter = nodemailer.createTransport({
+      service: "Gmail",
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+    });
+
+    await transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: "Your OTP (Resent)",
+      text: `Your new OTP is: ${otp}`,
+    });
+
+    res.json({ message: "OTP resent" });
+  } catch (err) {
+    console.error("Resend OTP error:", err);
+    res.status(500).json({ error: "Failed to resend OTP" });
   }
 });
 
